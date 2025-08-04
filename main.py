@@ -1,340 +1,219 @@
-from fastapi import FastAPI, HTTPException
-from selcom_apigw_client import apigwClient
+from fastapi import FastAPI, HTTPException, Request, Header, Depends
 from pydantic import BaseModel
+from dotenv import load_dotenv
+import os
+import uuid
 import logging
 from typing import Optional
-import os
-from dotenv import load_dotenv
+from auth import SelcomClient
+import httpx
 
 # Load environment variables
 load_dotenv()
 
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize FastAPI app
-app = FastAPI(title="Selcom API Full Service Test")
-
-# API credentials and base URL
 API_KEY = os.getenv("SELCOM_API_KEY")
 API_SECRET = os.getenv("SELCOM_API_SECRET")
-BASE_URL = os.getenv("SELCOM_BASE_URL", "https://api.sandbox.selcom.fake/v1")  # Fake base URL, change as needed
+BASE_URL = os.getenv("SELCOM_BASE_URL")
 VENDOR_ID = os.getenv("SELCOM_VENDOR_ID")
-# PIN will be passed as a parameter, not loaded from dotenv
+VENDOR_PIN = os.getenv("SELCOM_VENDOR_PIN")
+C2B_BEARER_TOKEN = os.getenv("C2B_BEARER_TOKEN")
 
-# Initialize Selcom API client
-client = apigwClient.Client(BASE_URL, API_KEY, API_SECRET)
+if not all([API_KEY, API_SECRET, BASE_URL, VENDOR_ID, VENDOR_PIN, C2B_BEARER_TOKEN]):
+    raise ValueError("Missing one or more required environment variables.")
 
-# Helper function to handle API responses
-def handle_response(response, transid: str):
-    result_code = response.get("resultcode")
-    if result_code == "000":
-        return {"status": "success", "response": response}
-    elif result_code in ["111", "927"]:
-        return {
-            "status": "in_progress",
-            "response": response,
-            "message": f"Transaction {transid} in progress. Query status after 3 minutes."
-        }
-    elif result_code == "999":
-        return {
-            "status": "ambiguous",
-            "response": response,
-            "message": f"Transaction {transid} status ambiguous. Wait for reconciliation."
-        }
-    else:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Transaction {transid} failed: {response.get('message')}"
-        )
+selcom_client = SelcomClient(api_key=API_KEY, api_secret=API_SECRET, base_url=BASE_URL)
 
-# Pydantic models for request payloads
-class UtilityPaymentRequest(BaseModel):
-    transid: str
+app = FastAPI(
+    title="Selcom Integration API",
+    description="A FastAPI application to handle Selcom B2C and C2B payments.",
+    version="1.0.0"
+)
+
+class B2CWalletCashinRequest(BaseModel):
     utilitycode: str
     utilityref: str
-    amount: int
+    amount: float
     msisdn: str
 
-class WalletCashinRequest(BaseModel):
+class QueryStatusRequest(BaseModel):
     transid: str
-    utilitycode: str
-    utilityref: str
-    amount: int
-    msisdn: str
 
-class SelcomPesaCashinRequest(BaseModel):
-    transid: str
-    utilityref: str
-    amount: int
-    msisdn: str
-
-class IMTRequest(BaseModel):
-    messageId: str
-    end2endId: str
-    sender: dict
-    sourceOfFunds: str
-    recipient: dict
-    currency: str
-    amount: int
-    purpose: str
-    personalMessage: Optional[str] = None
-    secretMessage: Optional[str] = None
-    sourceFI: dict
-    destinationFI: dict
-
-class MerchantValidationRequest(BaseModel):
-    transid: str
-    amount: int
-    reference: str
-
-class MerchantNotificationRequest(BaseModel):
+class SelcomResponse(BaseModel):
     transid: str
     reference: str
-    amount: int
-    result: str
     resultcode: str
+    result: str
     message: str
+    data: list
 
-class POSPaymentRequest(BaseModel):
+class C2BLookupPayload(BaseModel):
+    operator: str
     transid: str
-    currency: str
-    amount: int
-    payment_method: str
-    msisdn: Optional[str] = None
-    invoice_no: str
+    reference: str
+    utilityref: str
+    msisdn: str
 
-# Utility Payment Endpoints
-@app.post("/test-utility-payment")
-async def test_utility_payment(payment: UtilityPaymentRequest, pin: str):
+class C2BValidationPayload(BaseModel):
+    operator: str
+    transid: str
+    reference: str
+    utilityref: str
+    amount: float
+    msisdn: str
+
+class C2BResponse(BaseModel):
+    reference: str
+    resultcode: str
+    result: str
+    message: str
+    name: Optional[str] = None
+    amount: Optional[float] = None
+
+class PushUssdRequest(BaseModel):
+    utilityref: str
+    amount: float
+    msisdn: str
+
+class SelcomPushUssdResponse(BaseModel):
+    transid: str
+    reference: str
+    resultcode: str
+    result: str
+    message: str
+    data: Optional[list] = None
+
+class SelcomQueryStatusResponse(BaseModel):
+    transid: Optional[str] = None
+    reference: Optional[str] = None
+    resultcode: Optional[str] = None
+    result: Optional[str] = None
+    message: Optional[str] = None
+    data: Optional[list] = None
+
+async def verify_c2b_token(authorization: Optional[str] = Header(None)):
+    if authorization is None or authorization != f"Bearer {C2B_BEARER_TOKEN}":
+        raise HTTPException(status_code=401, detail="Unauthorized: Invalid C2B Bearer Token")
+    return authorization
+
+@app.get("/b2c/balance", response_model=SelcomResponse)
+async def get_float_balance():
+    transid = str(uuid.uuid4())
+    data = {
+        "vendor": VENDOR_ID,
+        "pin": VENDOR_PIN,
+        "transid": transid
+    }
+    response = await selcom_client.get(path="/v1/vendor/balance", params=data)
+    response.raise_for_status()
+    return response.json()
+
+@app.post("/b2c/wallet-cashin")
+async def wallet_cashin(request: B2CWalletCashinRequest):
+    transid = str(uuid.uuid4())
+    payment_payload = {
+        "transid": transid,
+        "utilitycode": request.utilitycode,
+        "utilityref": request.utilityref,
+        "amount": request.amount,
+        "vendor": VENDOR_ID,
+        "pin": VENDOR_PIN,
+        "msisdn": request.msisdn,
+    }
     try:
-        payload = {
-            "transid": payment.transid,
-            "utilitycode": payment.utilitycode,
-            "utilityref": payment.utilityref,
-            "amount": payment.amount,
-            "vendor": VENDOR_ID,
-            "pin": pin,
-            "msisdn": payment.msisdn
-        }
-        logger.info(f"Sending utility payment request: {payload}")
-        response = client.postFunc("/v1/utilitypayment/process", payload)
-        logger.info(f"Received response: {response}")
-        return handle_response(response, payment.transid)
-    except Exception as e:
-        logger.error(f"Error processing utility payment: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+        response = await selcom_client.post(path="/v1/walletcashin/process", data=payment_payload)
+        response.raise_for_status()
+        return response.json()
+    except httpx.HTTPStatusError as e:
+        logger.error(f"Selcom API error: {e.response.text}")
+        raise HTTPException(status_code=e.response.status_code, detail=e.response.json())
 
-@app.get("/test-utility-lookup")
-async def test_utility_lookup(utilitycode: str, utilityref: str, transid: str):
+@app.get("/b2c/query-status", response_model=SelcomResponse)
+async def query_b2c_status(transid: str):
+    params = {"transid": transid}
+    response = await selcom_client.get(path="/v1/walletcashin/query", params=params)
+    response.raise_for_status()
+    return response.json()
+
+@app.post("/c2b/lookup", response_model=C2BResponse)
+async def c2b_lookup(payload: C2BLookupPayload, auth_header: str = Depends(verify_c2b_token)):
+    logger.info(f"C2B Lookup request received: {payload.dict()}")
+    if payload.utilityref == "INVALID_REF":
+        return C2BResponse(
+            reference=payload.reference,
+            resultcode="010",
+            result="FAIL",
+            message="Invalid account or payment reference"
+        )
+    return C2BResponse(
+        reference=payload.reference,
+        resultcode="000",
+        result="SUCCESS",
+        message="Payment reference is valid",
+        name="John Doe",
+        amount=1000.00
+    )
+
+@app.post("/c2b/validation", response_model=C2BResponse)
+async def c2b_validation(payload: C2BValidationPayload, auth_header: str = Depends(verify_c2b_token)):
+    logger.info(f"C2B Validation request received: {payload.dict()}")
+    return C2BResponse(
+        reference=payload.reference,
+        resultcode="000",
+        result="SUCCESS",
+        message="Payment is valid"
+    )
+
+@app.post("/c2b/notification", response_model=C2BResponse)
+async def c2b_notification(payload: C2BValidationPayload, auth_header: str = Depends(verify_c2b_token)):
+    logger.info(f"C2B Notification received: {payload.dict()}")
+    return C2BResponse(
+        reference=payload.reference,
+        resultcode="000",
+        result="SUCCESS",
+        message="Payment has been successfully posted"
+    )
+
+@app.post("/wallet/push-ussd", response_model=SelcomPushUssdResponse)
+async def push_ussd_payment(request: PushUssdRequest):
+    transid = str(uuid.uuid4())
+    payload = {
+        "transid": transid,
+        "utilityref": request.utilityref,
+        "amount": request.amount,
+        "vendor": VENDOR_ID,
+        "pin": VENDOR_PIN,
+        "msisdn": request.msisdn,
+    }
     try:
-        payload = {"utilitycode": utilitycode, "utilityref": utilityref, "transid": transid}
-        logger.info(f"Sending utility lookup request: {payload}")
-        response = client.getFunc("/v1/utilitypayment/lookup", payload)
-        logger.info(f"Received response: {response}")
-        return handle_response(response, transid)
-    except Exception as e:
-        logger.error(f"Error processing utility lookup: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+        response = await selcom_client.post(path="/v1/wallet/pushussd", data=payload)
+        response.raise_for_status()
+        response_data = response.json()
+        logger.info(f"Push USSD successful for transid: {transid}, Selcom reference: {response_data.get('reference')}")
+        return response_data
+    except httpx.HTTPStatusError as e:
+        logger.error(f"Selcom API error during Push USSD: {e.response.text}")
+        raise HTTPException(status_code=e.response.status_code, detail=e.response.json())
 
-@app.get("/test-utility-query")
-async def test_utility_query(transid: str):
+@app.get("/c2b/query-status", response_model=SelcomQueryStatusResponse)
+async def query_c2b_status(transid: Optional[str] = None, reference: Optional[str] = None):
+    if not transid and not reference:
+        raise HTTPException(status_code=400, detail="Either 'transid' or 'reference' must be provided.")
+    params = {}
+    if transid:
+        params["transid"] = transid
+    if reference:
+        params["reference"] = reference
     try:
-        payload = {"transid": transid}
-        logger.info(f"Sending utility query request: {payload}")
-        response = client.getFunc("/v1/utilitypayment/query", payload)
-        logger.info(f"Received response: {response}")
-        return handle_response(response, transid)
-    except Exception as e:
-        logger.error(f"Error processing utility query: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+        response = await selcom_client.get(path="/v1/c2b/query-status", params=params)
+        response.raise_for_status()
+        return response.json()
+    except httpx.HTTPStatusError as e:
+        logger.error(f"Selcom API error during C2B status query: {e.response.text}")
+        raise HTTPException(status_code=e.response.status_code, detail=e.response.json())
 
-# Wallet Cashin Endpoints
-@app.post("/test-wallet-cashin")
-async def test_wallet_cashin(cashin: WalletCashinRequest, pin: str):
-    try:
-        payload = {
-            "transid": cashin.transid,
-            "utilitycode": cashin.utilitycode,
-            "utilityref": cashin.utilityref,
-            "amount": cashin.amount,
-            "vendor": VENDOR_ID,
-            "pin": pin,
-            "msisdn": cashin.msisdn
-        }
-        logger.info(f"Sending wallet cashin request: {payload}")
-        response = client.postFunc("/v1/walletcashin/process", payload)
-        logger.info(f"Received response: {response}")
-        return handle_response(response, cashin.transid)
-    except Exception as e:
-        logger.error(f"Error processing wallet cashin: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-
-@app.get("/test-wallet-namelookup")
-async def test_wallet_namelookup(utilitycode: str, utilityref: str, transid: str):
-    try:
-        payload = {"utilitycode": utilitycode, "utilityref": utilityref, "transid": transid}
-        logger.info(f"Sending wallet name lookup request: {payload}")
-        response = client.getFunc("/v1/walletcashin/namelookup", payload)
-        logger.info(f"Received response: {response}")
-        return handle_response(response, transid)
-    except Exception as e:
-        logger.error(f"Error processing wallet name lookup: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-
-@app.get("/test-wallet-query")
-async def test_wallet_query(transid: str):
-    try:
-        payload = {"transid": transid}
-        logger.info(f"Sending wallet query request: {payload}")
-        response = client.getFunc("/v1/walletcashin/query", payload)
-        logger.info(f"Received response: {response}")
-        return handle_response(response, transid)
-    except Exception as e:
-        logger.error(f"Error processing wallet query: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-
-# Selcom Pesa Cashin Endpoint
-@app.post("/test-selcom-pesa-cashin")
-async def test_selcom_pesa_cashin(cashin: SelcomPesaCashinRequest, pin: str):
-    try:
-        payload = {
-            "transid": cashin.transid,
-            "utilityref": cashin.utilityref,
-            "amount": cashin.amount,
-            "vendor": VENDOR_ID,
-            "pin": pin,
-            "msisdn": cashin.msisdn
-        }
-        logger.info(f"Sending Selcom Pesa cashin request: {payload}")
-        response = client.postFunc("/v1/selcompesa/cashin", payload)
-        logger.info(f"Received response: {response}")
-        return handle_response(response, cashin.transid)
-    except Exception as e:
-        logger.error(f"Error processing Selcom Pesa cashin: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-
-# International Money Transfer (IMT) Endpoints
-@app.post("/test-imt-send-money")
-async def test_imt_send_money(imt: IMTRequest, pin: str):
-    try:
-        payload = {
-            "messageId": imt.messageId,
-            "end2endId": imt.end2endId,
-            "sender": imt.sender,
-            "sourceOfFunds": imt.sourceOfFunds,
-            "recipient": imt.recipient,
-            "vendor": VENDOR_ID,
-            "pin": pin,
-            "currency": imt.currency,
-            "amount": imt.amount,
-            "purpose": imt.purpose,
-            "personalMessage": imt.personalMessage,
-            "secretMessage": imt.secretMessage,
-            "sourceFI": imt.sourceFI,
-            "destinationFI": imt.destinationFI
-        }
-        logger.info(f"Sending IMT send money request: {payload}")
-        response = client.postFunc("/v1/imt/send-money", payload)
-        logger.info(f"Received response: {response}")
-        return handle_response(response, imt.messageId)
-    except Exception as e:
-        logger.error(f"Error processing IMT send money: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-
-@app.get("/test-imt-wallet-namelookup")
-async def test_imt_wallet_namelookup(utilitycode: str, utilityref: str, transid: str):
-    try:
-        payload = {"utilitycode": utilitycode, "utilityref": utilityref, "transid": transid}
-        logger.info(f"Sending IMT wallet name lookup request: {payload}")
-        response = client.getFunc("/v1/imt/wallet-namelookup", payload)
-        logger.info(f"Received response: {response}")
-        return handle_response(response, transid)
-    except Exception as e:
-        logger.error(f"Error processing IMT wallet name lookup: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-
-@app.get("/test-imt-bank-namelookup")
-async def test_imt_bank_namelookup(bank: str, account: str, transid: str):
-    try:
-        payload = {"bank": bank, "account": account, "transid": transid}
-        logger.info(f"Sending IMT bank name lookup request: {payload}")
-        response = client.getFunc("/v1/imt/bank-namelookup", payload)
-        logger.info(f"Received response: {response}")
-        return handle_response(response, transid)
-    except Exception as e:
-        logger.error(f"Error processing IMT bank name lookup: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-
-@app.get("/test-imt-query")
-async def test_imt_query(messageId: str):
-    try:
-        payload = {"messageId": messageId}
-        logger.info(f"Sending IMT query request: {payload}")
-        response = client.getFunc("/v1/imt/query", payload)
-        logger.info(f"Received response: {response}")
-        return handle_response(response, messageId)
-    except Exception as e:
-        logger.error(f"Error processing IMT query: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-
-# Merchant Payment Processing Endpoints
-@app.post("/test-merchant-validation")
-async def test_merchant_validation(validation: MerchantValidationRequest):
-    try:
-        payload = {
-            "transid": validation.transid,
-            "amount": validation.amount,
-            "reference": validation.reference
-        }
-        logger.info(f"Sending merchant validation request: {payload}")
-        response = client.postFunc("/validation", payload)
-        logger.info(f"Received response: {response}")
-        return handle_response(response, validation.transid)
-    except Exception as e:
-        logger.error(f"Error processing merchant validation: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-
-@app.post("/test-merchant-notification")
-async def test_merchant_notification(notification: MerchantNotificationRequest):
-    try:
-        payload = {
-            "transid": notification.transid,
-            "reference": notification.reference,
-            "amount": notification.amount,
-            "result": notification.result,
-            "resultcode": notification.resultcode,
-            "message": notification.message
-        }
-        logger.info(f"Sending merchant notification request: {payload}")
-        response = client.postFunc("/notification", payload)
-        logger.info(f"Received response: {response}")
-        return handle_response(response, notification.transid)
-    except Exception as e:
-        logger.error(f"Error processing merchant notification: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-
-@app.post("/test-pos-payment")
-async def test_pos_payment(payment: POSPaymentRequest):
-    try:
-        payload = {
-            "transid": payment.transid,
-            "currency": payment.currency,
-            "amount": payment.amount,
-            "payment_method": payment.payment_method,
-            "msisdn": payment.msisdn,
-            "invoice_no": payment.invoice_no
-        }
-        logger.info(f"Sending POS payment request: {payload}")
-        response = client.postFunc("/v1/checkout/initiate-pos-payment", payload)
-        logger.info(f"Received response: {response}")
-        return handle_response(response, payment.transid)
-    except Exception as e:
-        logger.error(f"Error processing POS payment: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-
-# Root endpoint for testing
 @app.get("/")
 async def root():
-    return {"message": "Selcom API Full Service Test Server is running"}
+    return {"message": "Selcom Integration API is running"}
