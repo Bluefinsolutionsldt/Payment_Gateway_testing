@@ -169,7 +169,7 @@ def create_order_minimal(request: CreateOrderMinimalRequest):
             #     statusDesc=result_code,
                 
             # )
-            {"response":response_data}
+            return {"response":response_data}
     except Exception as e:
         logger.error(f"Error in /checkout/create-order-minimal: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
