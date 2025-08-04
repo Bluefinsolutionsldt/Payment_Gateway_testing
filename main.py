@@ -164,10 +164,12 @@ def create_order_minimal(request: CreateOrderMinimalRequest):
                 order_id=request.order_id
             )
         else:
-            return CreateOrderMinimalResponse(
-                status="201",
-                statusDesc=result_code
-            )
+            # return CreateOrderMinimalResponse(
+            #     status="201",
+            #     statusDesc=result_code,
+                
+            # )
+            {"response":response_data}
     except Exception as e:
         logger.error(f"Error in /checkout/create-order-minimal: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
