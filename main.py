@@ -128,7 +128,7 @@ async def verify_c2b_token(authorization: Optional[str] = Header(None)):
         raise HTTPException(status_code=401, detail="Unauthorized: Invalid C2B Bearer Token")
     return authorization
 
-@app.post("/checkout/create-order-minimal", response_model=CreateOrderMinimalResponse)
+@app.post("/checkout/create-order-minimal")
 def create_order_minimal(request: CreateOrderMinimalRequest):
     try:
         order_payload = {
@@ -164,12 +164,8 @@ def create_order_minimal(request: CreateOrderMinimalRequest):
                 order_id=request.order_id
             )
         else:
-            # return CreateOrderMinimalResponse(
-            #     status="201",
-            #     statusDesc=result_code,
-                
-            # )
-            return {"response":response_data}
+            print(response_data)
+            return response_data
     except Exception as e:
         logger.error(f"Error in /checkout/create-order-minimal: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
