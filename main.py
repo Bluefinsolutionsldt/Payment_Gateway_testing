@@ -93,6 +93,25 @@ class SelcomQueryStatusResponse(BaseModel):
     message: Optional[str] = None
     data: Optional[list] = None
 
+class CreateOrderMinimalRequest(BaseModel):
+    order_id: str
+    buyer_email: str
+    buyer_name: str
+    buyer_phone: str
+    amount: float
+    currency: str = "TZS"
+    webhook: str
+    buyer_remarks: Optional[str] = "None"
+    merchant_remarks: Optional[str] = "None"
+    no_of_items: int = 1
+
+class CreateOrderMinimalResponse(BaseModel):
+    status: str
+    statusDesc: str
+    reference: Optional[str] = None
+    paymentGatewayUrl: Optional[str] = None
+    order_id: Optional[str] = None
+
 async def verify_c2b_token(authorization: Optional[str] = Header(None)):
     if authorization is None or authorization != f"Bearer {C2B_BEARER_TOKEN}":
         raise HTTPException(status_code=401, detail="Unauthorized: Invalid C2B Bearer Token")
@@ -212,6 +231,54 @@ async def query_c2b_status(transid: Optional[str] = None, reference: Optional[st
         return response.json()
     except httpx.HTTPStatusError as e:
         logger.error(f"Selcom API error during C2B status query: {e.response.text}")
+        raise HTTPException(status_code=e.response.status_code, detail=e.response.json())
+
+@app.post("/checkout/create-order-minimal", response_model=CreateOrderMinimalResponse)
+async def create_order_minimal(request: CreateOrderMinimalRequest):
+    order_payload = {
+        "vendor": VENDOR_ID,
+        "order_id": request.order_id,
+        "buyer_email": request.buyer_email,
+        "buyer_name": request.buyer_name,
+        "buyer_phone": request.buyer_phone,
+        "amount": request.amount,
+        "currency": request.currency,
+        "webhook": request.webhook,
+        "buyer_remarks": request.buyer_remarks,
+        "merchant_remarks": request.merchant_remarks,
+        "no_of_items": request.no_of_items
+    }
+    order_path = "/v1/checkout/create-order-minimal"
+    try:
+        response = await selcom_client.post(path=order_path, data=order_payload)
+        response_data = response.json()
+        result_code = response_data.get("result")
+        if result_code == "SUCCESS":
+            payment_gateway_url = response_data.get("data", [{}])[0].get("payment_gateway_url", "none")
+            reference = response_data.get("reference")
+            # Wallet payment
+            wallet_payment_payload = {
+                "transid": reference,
+                "order_id": request.order_id,
+                "msisdn": request.buyer_phone
+            }
+            wallet_payment_path = "/v1/checkout/wallet-payment"
+            response2 = await selcom_client.post(path=wallet_payment_path, data=wallet_payment_payload)
+            # You can process response2 if needed
+            return CreateOrderMinimalResponse(
+                status="200",
+                statusDesc=result_code,
+                reference=reference,
+                paymentGatewayUrl=payment_gateway_url,
+                order_id=request.order_id
+            )
+        else:
+            return CreateOrderMinimalResponse(
+                status="201",
+                statusDesc=result_code
+            )
+    except httpx.HTTPStatusError as e:
+        logger.error(f"Selcom API error during create-order-minimal: {e.response.text}")
         raise HTTPException(status_code=e.response.status_code, detail=e.response.json())
 
 @app.get("/")
