@@ -53,9 +53,9 @@ async def verify_c2b_token(authorization: Optional[str] = Header(None)):
 # --- Pydantic Models for API Requests and Responses ---
 class SelcomGenericResponse(BaseModel):
     reference: Optional[str] = None
-    resultcode: str
-    result: str
-    message: str
+    resultcode: Optional[str] = None
+    result: Optional[str] = None
+    message: Optional[str] = None
     data: Optional[Any] = None
 
 class CreateOrderMinimalRequest(BaseModel):
