@@ -36,73 +36,12 @@ app = FastAPI(
     version="1.0.0"
 )
 
-class B2CWalletCashinRequest(BaseModel):
-    utilitycode: str
-    utilityref: str
-    amount: float
-    msisdn: str
-
-class QueryStatusRequest(BaseModel):
-    transid: str
-
-class SelcomResponse(BaseModel):
-    transid: str
-    reference: str
-    resultcode: str
-    result: str
-    message: str
-    data: list
-
-class C2BLookupPayload(BaseModel):
-    operator: str
-    transid: str
-    reference: str
-    utilityref: str
-    msisdn: str
-
-class C2BValidationPayload(BaseModel):
-    operator: str
-    transid: str
-    reference: str
-    utilityref: str
-    amount: float
-    msisdn: str
-
-class C2BResponse(BaseModel):
-    reference: str
-    resultcode: str
-    result: str
-    message: str
-    name: Optional[str] = None
-    amount: Optional[float] = None
-
-class PushUssdRequest(BaseModel):
-    utilityref: str
-    amount: float
-    msisdn: str
-
-class SelcomPushUssdResponse(BaseModel):
-    transid: str
-    reference: str
-    resultcode: str
-    result: str
-    message: str
-    data: Optional[list] = None
-
-class SelcomQueryStatusResponse(BaseModel):
-    transid: Optional[str] = None
-    reference: Optional[str] = None
-    resultcode: Optional[str] = None
-    result: Optional[str] = None
-    message: Optional[str] = None
-    data: Optional[list] = None
-
 class CreateOrderMinimalRequest(BaseModel):
     order_id: str
     buyer_email: str
     buyer_name: str
     buyer_phone: str
-    amount: float
+    amount: int
     currency: str = "TZS"
     buyer_remarks: Optional[str] = "None"
     merchant_remarks: Optional[str] = "None"
